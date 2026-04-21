@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Stream</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+      }
+      img {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        object-fit: contain;
+      }
+      .hud {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        color: #9f9;
+        font: 12px/1.2 monospace;
+        background: rgba(0, 0, 0, 0.4);
+        padding: 4px 6px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <img id="s" alt="" />
+    <div class="hud" id="hud"></div>
+    <script>
+      const id = new URLSearchParams(location.search).get("id") || "agent1";
+      const img = document.getElementById("s");
+      const hud = document.getElementById("hud");
+      img.src = `/stream/${encodeURIComponent(id)}?t=${Date.now()}`;
+      async function tick() {
+        try {
+          const d = await (await fetch("/agents")).json();
+          const a = d.agents.find((x) => x.id === id);
+          hud.textContent = a
+            ? `${id}  ${a.frames} кадров  uptime ${a.uptime_s}s`
+            : `${id}: нет данных`;
+        } catch (e) {}
+      }
+      tick();
+      setInterval(tick, 2000);
+    </script>
+  </body>
+</html>

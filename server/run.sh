@@ -7,8 +7,4 @@ cd "$(dirname "$0")"
 # если нужна авторизация агентов:
 # export AGENT_TOKEN="s3cret"
 
-exec uvicorn main:app \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --proxy-headers \
-    --no-access-log
+exec uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --no-access-log

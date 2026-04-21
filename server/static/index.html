@@ -115,14 +115,17 @@
             const el = document.createElement("div");
             el.className = "card";
             el.innerHTML = `
-        <header>
-          <span><span class="dot"></span><b></b></span>
-          <span class="stats"></span>
-        </header>
-        <img alt="stream">`;
+              <header>
+                <span><span class="dot"></span><b></b></span>
+                <span class="stats"></span>
+              </header>
+              <a target="_blank"><img alt="stream"></a>`;
+
             grid.appendChild(el);
             const img = el.querySelector("img");
             img.src = `/stream/${encodeURIComponent(a.id)}?t=${Date.now()}`;
+            el.querySelector("a").href =
+              `/static/view.html?id=${encodeURIComponent(a.id)}`;
             // считаем fps на клиенте по событию load? MJPEG multipart не вызывает load на каждый кадр в большинстве браузеров,
             // поэтому fps берём из сервера (frames / uptime)
             c = {
