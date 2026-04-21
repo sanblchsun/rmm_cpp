@@ -1,0 +1,9 @@
+services:
+  relay:
+    build: .
+    container_name: relay
+    ports:
+      - "8000:8000"
+    environment:
+      - AGENT_TOKEN=${AGENT_TOKEN:-}
+    restart: unless-stopped

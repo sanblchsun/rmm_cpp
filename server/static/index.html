@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>MJPEG viewer</title>
+    <style>
+      body {
+        font-family: system-ui, Arial, sans-serif;
+        background: #111;
+        color: #eee;
+        margin: 0;
+        padding: 16px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 18px;
+      }
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+      }
+      .card {
+        background: #1b1b1b;
+        border: 1px solid #333;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .card header {
+        padding: 8px 12px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: #222;
+        font-size: 14px;
+      }
+      .card img {
+        display: block;
+        width: 100%;
+        height: auto;
+        background: #000;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 6px;
+      }
+      .ok {
+        background: #3c3;
+      }
+      .off {
+        background: #c33;
+      }
+      .stats {
+        font-size: 12px;
+        color: #aaa;
+      }
+      .empty {
+        color: #888;
+        padding: 40px;
+        text-align: center;
+        border: 1px dashed #444;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Агенты (обновление каждые 3 с)</h1>
+    <div id="root"></div>
+
+    <script>
+      const root = document.getElementById("root");
+      const cards = new Map(); // id -> {el, img, stats, fpsCounter}
+
+      async function refresh() {
+        let data;
+        try {
+          data = await (await fetch("/agents")).json();
+        } catch (e) {
+          return;
+        }
+
+        const ids = new Set(data.agents.map((a) => a.id));
+
+        // удалить исчезнувших
+        for (const [id, c] of cards) {
+          if (!ids.has(id)) {
+            c.el.remove();
+            cards.delete(id);
+          }
+        }
+
+        if (data.agents.length === 0 && !document.getElementById("empty")) {
+          root.innerHTML =
+            '<div class="empty" id="empty">Нет подключённых агентов. Запустите agent.exe.</div>';
+          return;
+        }
+        if (data.agents.length > 0) {
+          const e = document.getElementById("empty");
+          if (e) e.remove();
+          if (!document.getElementById("grid")) {
+            const g = document.createElement("div");
+            g.className = "grid";
+            g.id = "grid";
+            root.appendChild(g);
+          }
+        }
+        const grid = document.getElementById("grid");
+
+        for (const a of data.agents) {
+          let c = cards.get(a.id);
+          if (!c) {
+            const el = document.createElement("div");
+            el.className = "card";
+            el.innerHTML = `
+        <header>
+          <span><span class="dot"></span><b></b></span>
+          <span class="stats"></span>
+        </header>
+        <img alt="stream">`;
+            grid.appendChild(el);
+            const img = el.querySelector("img");
+            img.src = `/stream/${encodeURIComponent(a.id)}?t=${Date.now()}`;
+            // считаем fps на клиенте по событию load? MJPEG multipart не вызывает load на каждый кадр в большинстве браузеров,
+            // поэтому fps берём из сервера (frames / uptime)
+            c = {
+              el,
+              img,
+              stats: el.querySelector(".stats"),
+              name: el.querySelector("b"),
+              dot: el.querySelector(".dot"),
+              lastFrames: a.frames,
+              lastTime: Date.now(),
+            };
+            cards.set(a.id, c);
+          }
+          c.name.textContent = a.id;
+          c.dot.className = "dot " + (a.alive ? "ok" : "off");
+          const dt = (Date.now() - c.lastTime) / 1000;
+          const df = a.frames - c.lastFrames;
+          const fps = dt > 0 ? (df / dt).toFixed(1) : "0.0";
+          c.lastFrames = a.frames;
+          c.lastTime = Date.now();
+          c.stats.textContent = `${fps} fps · ${a.frames} кадров · uptime ${a.uptime_s}s`;
+        }
+      }
+      refresh();
+      setInterval(refresh, 3000);
+    </script>
+  </body>
+</html>
