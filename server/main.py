@@ -1,12 +1,17 @@
-# FastAPI: MJPEG + H.264, переключение кодека через /agents/{id}/config.
-import asyncio, time, re
-from typing import Dict, Optional, Set, List
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
+# server/main.py
+# FastAPI: MJPEG + H.264, переключение кодека через /agents/{id}/config,
+# управление мышью через /ws/control/{agent|viewer}/{id}.
+import asyncio
+import time
+import json
+from typing import Dict, Optional, Set
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Stream relay (MJPEG + H.264)")
+app = FastAPI(title="Stream relay (MJPEG + H.264) + control")
 
 
 # ============ MODEL ============
@@ -21,43 +26,39 @@ class AgentState:
         "encoder_current",
         "bitrate_current",
         "fps_current",
-        # mjpeg:
         "mjpeg_latest",
         "mjpeg_count",
         "_mjpeg_event",
-        # h264:
-        "h264_keyframe_buffer",  # последние байты начиная с последнего keyframe
-        "h264_subscribers",  # set of asyncio.Queue[bytes]
+        "h264_keyframe_buffer",
+        "h264_subscribers",
         "h264_count",
-        # общее:
         "updated",
         "started",
     )
 
     def __init__(self):
-        # target = что админ хочет; current = что реально шлёт агент
         self.codec_target = "mjpeg"
         self.encoder_target = "cpu"
         self.bitrate_target = "4M"
         self.fps_target = 30
         self.mjpeg_q_target = 4
+
         self.codec_current: Optional[str] = None
         self.encoder_current: Optional[str] = None
         self.bitrate_current: Optional[str] = None
         self.fps_current: Optional[int] = None
 
         self.mjpeg_latest: Optional[bytes] = None
-        self.mjpeg_count = 0
+        self.mjpeg_count: int = 0
         self._mjpeg_event = asyncio.Event()
 
         self.h264_keyframe_buffer = bytearray()
         self.h264_subscribers: Set[asyncio.Queue] = set()
-        self.h264_count = 0
+        self.h264_count: int = 0
 
-        self.updated = 0.0
-        self.started = time.time()
+        self.updated: float = 0.0
+        self.started: float = time.time()
 
-    # --- MJPEG ---
     def push_mjpeg(self, frame: bytes):
         self.mjpeg_latest = frame
         self.mjpeg_count += 1
@@ -66,35 +67,25 @@ class AgentState:
         self._mjpeg_event = asyncio.Event()
         ev.set()
 
-    async def wait_mjpeg(self, timeout=5.0) -> bool:
+    async def wait_mjpeg(self, timeout: float = 5.0) -> bool:
         try:
             await asyncio.wait_for(self._mjpeg_event.wait(), timeout=timeout)
             return True
         except asyncio.TimeoutError:
             return False
 
-    # --- H.264 ---
     def push_h264(self, chunk: bytes):
-        """
-        Накопительно кладём байты в keyframe_buffer. Если в чанке встречен IDR NALU,
-        сбрасываем буфер так, чтобы он начинался именно с этого IDR (ровно с его стартового кода).
-        Также рассылаем чанк всем активным подписчикам.
-        """
         idr_off = find_idr_offset(chunk)
         if idr_off >= 0:
-            # буфер начинается с IDR-фрейма
             self.h264_keyframe_buffer = bytearray(chunk[idr_off:])
             self.h264_count += 1
         else:
             self.h264_keyframe_buffer.extend(chunk)
             if len(self.h264_keyframe_buffer) > 32 * 1024 * 1024:
-                # страховка: держим не больше 32 MB между keyframe
                 self.h264_keyframe_buffer = self.h264_keyframe_buffer[
                     -8 * 1024 * 1024 :
                 ]
-
         self.updated = time.time()
-        # рассылка
         dead = []
         for q in self.h264_subscribers:
             try:
@@ -119,37 +110,102 @@ async def get_agent(aid: str) -> AgentState:
 
 
 # ============ H.264 helpers ============
-# Находим в Annex-B смещение первого NALU с типом 5 (IDR). Start code: 000001 или 00000001.
-_IDR_RE3 = re.compile(
-    rb"\x00\x00\x01[\x65\xE5\x45\xC5]"
-)  # nal_ref_idc|type=5, любой nal_ref_idc
-
-
-# В WebCodecs достаточно, чтобы blob начинался со SPS/PPS/IDR — но SPS/PPS обычно идут вместе с IDR
-# у libx264/hw-энкодеров (repeat-headers). Если нет — агент настроен на repeat_sps/pps.
-# Упрощённо ищем NALU-заголовок с типом 5:
 def find_idr_offset(buf: bytes) -> int:
-    """Возвращает индекс первого start code, после которого идёт IDR NALU (type=5). Или -1."""
+    """Смещение первого start code с последующим NALU типа 7 (SPS) или 5 (IDR)."""
     i = 0
     n = len(buf)
     while i < n - 3:
         if buf[i] == 0 and buf[i + 1] == 0:
-            sc_len = 0
+            sc = 0
             if buf[i + 2] == 1:
-                sc_len = 3
+                sc = 3
             elif i + 3 < n and buf[i + 2] == 0 and buf[i + 3] == 1:
-                sc_len = 4
-            if sc_len:
-                if i + sc_len < n:
-                    nalu_type = buf[i + sc_len] & 0x1F
-                    if nalu_type == 7:  # SPS — ещё лучше, чем IDR: у декодера будет всё
+                sc = 4
+            if sc:
+                if i + sc < n:
+                    t = buf[i + sc] & 0x1F
+                    if t == 7 or t == 5:
                         return i
-                    if nalu_type == 5:
-                        return i
-                i += sc_len
+                i += sc
                 continue
         i += 1
     return -1
+
+
+# ============ CONTROL HUB ============
+class ControlHub:
+    def __init__(self):
+        self.agent_ws: Dict[str, WebSocket] = {}
+        self.viewer_ws: Dict[str, Set[WebSocket]] = {}
+        self.agent_hello: Dict[str, str] = {}
+
+
+HUB = ControlHub()
+
+
+@app.websocket("/ws/control/agent/{aid}")
+async def ws_control_agent(ws: WebSocket, aid: str):
+    await ws.accept()
+    old = HUB.agent_ws.get(aid)
+    if old is not None:
+        try:
+            await old.close()
+        except Exception:
+            pass
+    HUB.agent_ws[aid] = ws
+    print(f"[ctrl] agent connected: {aid}")
+    try:
+        while True:
+            msg = await ws.receive_text()
+            try:
+                obj = json.loads(msg)
+            except Exception:
+                continue
+            if obj.get("type") == "hello":
+                HUB.agent_hello[aid] = msg
+                for vws in list(HUB.viewer_ws.get(aid, ())):
+                    try:
+                        await vws.send_text(msg)
+                    except Exception:
+                        pass
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[ctrl] agent {aid}: {e}")
+    finally:
+        if HUB.agent_ws.get(aid) is ws:
+            HUB.agent_ws.pop(aid, None)
+            HUB.agent_hello.pop(aid, None)
+        print(f"[ctrl] agent disconnected: {aid}")
+
+
+@app.websocket("/ws/control/viewer/{aid}")
+async def ws_control_viewer(ws: WebSocket, aid: str):
+    await ws.accept()
+    HUB.viewer_ws.setdefault(aid, set()).add(ws)
+    hello = HUB.agent_hello.get(aid)
+    if hello:
+        try:
+            await ws.send_text(hello)
+        except Exception:
+            pass
+    try:
+        while True:
+            msg = await ws.receive_text()
+            agent = HUB.agent_ws.get(aid)
+            if agent is not None:
+                try:
+                    await agent.send_text(msg)
+                except Exception:
+                    pass
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[ctrl] viewer {aid}: {e}")
+    finally:
+        s = HUB.viewer_ws.get(aid)
+        if s is not None:
+            s.discard(ws)
 
 
 # ============ CONFIG (admin) ============
@@ -164,14 +220,13 @@ class ConfigBody(BaseModel):
 @app.get("/agents/{aid}/config", response_class=PlainTextResponse)
 async def get_config(aid: str):
     a = await get_agent(aid)
-    lines = [
-        f"codec={a.codec_target}",
-        f"encoder={a.encoder_target}",
-        f"bitrate={a.bitrate_target}",
-        f"fps={a.fps_target}",
-        f"mjpeg_q={a.mjpeg_q_target}",
-    ]
-    return "\n".join(lines) + "\n"
+    return (
+        f"codec={a.codec_target}\n"
+        f"encoder={a.encoder_target}\n"
+        f"bitrate={a.bitrate_target}\n"
+        f"fps={a.fps_target}\n"
+        f"mjpeg_q={a.mjpeg_q_target}\n"
+    )
 
 
 @app.post("/agents/{aid}/config")
@@ -294,7 +349,6 @@ async def ws_h264(ws: WebSocket, aid: str):
     await ws.accept()
     a = await get_agent(aid)
     q: asyncio.Queue = asyncio.Queue(maxsize=200)
-    # отдаём стартовый буфер (начинается с SPS/IDR, если он есть) — чтобы декодер сразу завёлся
     if a.h264_keyframe_buffer:
         await ws.send_bytes(bytes(a.h264_keyframe_buffer))
     a.h264_subscribers.add(q)
@@ -325,6 +379,7 @@ async def list_agents():
                 "mjpeg_frames": a.mjpeg_count,
                 "h264_keyframes": a.h264_count,
                 "h264_viewers": len(a.h264_subscribers),
+                "ctrl_connected": aid in HUB.agent_ws,
                 "target": {
                     "codec": a.codec_target,
                     "encoder": a.encoder_target,
