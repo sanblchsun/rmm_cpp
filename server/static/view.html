@@ -1,52 +1,203 @@
 <!doctype html>
-<html lang="ru">
-  <head>
-    <meta charset="utf-8" />
-    <title>Stream</title>
-    <style>
-      html,
-      body {
-        margin: 0;
-        height: 100%;
-        background: #000;
+<html lang="ru"><head><meta charset="utf-8"><title>Stream</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;color:#9f9;font:12px monospace;}
+  #media{display:block;width:100vw;height:100vh;object-fit:contain;background:#000;}
+  canvas{display:block;width:100vw;height:100vh;object-fit:contain;background:#000;}
+  .hud{position:fixed;top:8px;left:8px;background:rgba(0,0,0,.45);padding:4px 8px;border-radius:4px;}
+  .err{position:fixed;top:8px;right:8px;background:rgba(120,0,0,.6);padding:4px 8px;border-radius:4px;color:#fff;}
+</style></head><body>
+<div id="container"></div>
+<div class="hud" id="hud">loading…</div>
+<div class="err"  id="err" style="display:none"></div>
+
+<script type="module">
+const qs  = new URLSearchParams(location.search);
+const id  = qs.get('id') || 'agent1';
+const hud = document.getElementById('hud');
+const err = document.getElementById('err');
+const box = document.getElementById('container');
+
+function showErr(t){ err.style.display='block'; err.textContent = t; }
+
+async function getConfig(){
+  const r = await fetch(`/agents/${encodeURIComponent(id)}/config`);
+  const txt = await r.text();
+  const o = {}; txt.split(/\r?\n/).forEach(L=>{
+    const i = L.indexOf('='); if (i>0) o[L.slice(0,i)] = L.slice(i+1);
+  });
+  return o;
+}
+
+async function getCurrent(){
+  const d = await (await fetch('/agents')).json();
+  return d.agents.find(a => a.id === id);
+}
+
+let mode = null;
+
+async function start(){
+  const a = await getCurrent();
+  const cur = a?.current?.codec || (await getConfig()).codec;
+  mode = cur === 'h264' ? 'h264' : 'mjpeg';
+
+  if (mode === 'mjpeg'){
+    box.innerHTML = `<img id="media" src="/stream/mjpeg/${encodeURIComponent(id)}?t=${Date.now()}">`;
+  } else {
+    box.innerHTML = `<canvas id="media"></canvas>`;
+    startH264(document.getElementById('media'));
+  }
+}
+
+// ===== H.264 via WebCodecs =====
+function nalType(byte){ return byte & 0x1F; }
+
+function startH264(canvas){
+  if (!('VideoDecoder' in window)){
+    showErr('Браузер не поддерживает WebCodecs. Обновите Chrome/Edge.');
+    return;
+  }
+  const ctx = canvas.getContext('2d');
+  let decoder = null;
+  let buf = new Uint8Array(0);
+  let waitingKey = true;
+  let frames = 0, bytes = 0, t0 = performance.now();
+
+  const ws = new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/stream/h264/${encodeURIComponent(id)}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen  = ()=> hud.textContent = 'h264: connected, waiting keyframe…';
+  ws.onclose = ()=> hud.textContent = 'h264: disconnected';
+  ws.onerror = ()=> showErr('WebSocket error');
+
+  ws.onmessage = (ev)=>{
+    const add = new Uint8Array(ev.data);
+    bytes += add.length;
+    const merged = new Uint8Array(buf.length + add.length);
+    merged.set(buf,0); merged.set(add, buf.length);
+    buf = merged;
+    drainAUs();
+  };
+
+  // ищем позиции всех start-кодов в buf
+  function findStartCodes(data){
+    const out = [];
+    let i = 0, n = data.length;
+    while (i + 3 < n){
+      if (data[i]===0 && data[i+1]===0){
+        if (data[i+2]===1){ out.push({pos:i,len:3}); i+=3; continue; }
+        if (i+3 < n && data[i+2]===0 && data[i+3]===1){ out.push({pos:i,len:4}); i+=4; continue; }
       }
-      img {
-        display: block;
-        width: 100vw;
-        height: 100vh;
-        object-fit: contain;
+      i++;
+    }
+    return out;
+  }
+
+  // разбираем на access-units по AUD (тип 9); если AUD нет — по SPS/IDR.
+  function drainAUs(){
+    const codes = findStartCodes(buf);
+    if (codes.length < 2) return;
+    // AU начинается со start code, перед которым либо AUD, либо это SPS/IDR (если нет AUD)
+    // Найдём позиции "начал AU": start code + NALU-тип 9 (AUD). Если нет ни одного AUD — fallback
+    // на: каждая группа, начинающаяся с SPS(7), считается новой AU.
+    const starts = [];
+    for (const c of codes){
+      const t = nalType(buf[c.pos + c.len]);
+      if (t === 9 || t === 7) starts.push(c.pos);   // AUD или SPS = начало AU
+    }
+    if (starts.length < 2) return;
+    // забираем все завершённые AU, последнюю оставляем в буфере
+    for (let i = 0; i < starts.length - 1; i++){
+      const au = buf.subarray(starts[i], starts[i+1]);
+      handleAU(au);
+    }
+    buf = buf.slice(starts[starts.length-1]);
+  }
+
+  function findNALU(au, wantedType){
+    const cs = findStartCodes(au);
+    for (const c of cs){
+      if (nalType(au[c.pos + c.len]) === wantedType) return c.pos + c.len;
+    }
+    return -1;
+  }
+
+  function codecStringFromSPS(au){
+    const spsOff = findNALU(au, 7);
+    if (spsOff < 0) return 'avc1.42E01E'; // baseline 3.0 fallback
+    const profile = au[spsOff + 1];
+    const flags   = au[spsOff + 2];
+    const level   = au[spsOff + 3];
+    const h = (x)=>x.toString(16).padStart(2,'0').toUpperCase();
+    return `avc1.${h(profile)}${h(flags)}${h(level)}`;
+  }
+
+  function handleAU(au){
+    const hasSPS = findNALU(au, 7) >= 0;
+    const hasIDR = findNALU(au, 5) >= 0;
+    const isKey  = hasSPS || hasIDR;
+
+    if (waitingKey){
+      if (!isKey) return;
+      waitingKey = false;
+      const codec = codecStringFromSPS(au);
+      try {
+        decoder = new VideoDecoder({
+          output: onFrame,
+          error:  e => showErr('decoder: ' + e.message),
+        });
+        decoder.configure({
+          codec,
+          optimizeForLatency: true,
+          hardwareAcceleration: 'prefer-hardware',
+        });
+        hud.textContent = `h264: decoder configured (${codec})`;
+      } catch(e){
+        showErr('configure failed: ' + e.message);
+        return;
       }
-      .hud {
-        position: fixed;
-        top: 8px;
-        left: 8px;
-        color: #9f9;
-        font: 12px/1.2 monospace;
-        background: rgba(0, 0, 0, 0.4);
-        padding: 4px 6px;
-        border-radius: 4px;
-      }
-    </style>
-  </head>
-  <body>
-    <img id="s" alt="" />
-    <div class="hud" id="hud"></div>
-    <script>
-      const id = new URLSearchParams(location.search).get("id") || "agent1";
-      const img = document.getElementById("s");
-      const hud = document.getElementById("hud");
-      img.src = `/stream/${encodeURIComponent(id)}?t=${Date.now()}`;
-      async function tick() {
-        try {
-          const d = await (await fetch("/agents")).json();
-          const a = d.agents.find((x) => x.id === id);
-          hud.textContent = a
-            ? `${id}  ${a.frames} кадров  uptime ${a.uptime_s}s`
-            : `${id}: нет данных`;
-        } catch (e) {}
-      }
-      tick();
-      setInterval(tick, 2000);
-    </script>
-  </body>
-</html>
+    }
+    if (!decoder || decoder.state !== 'configured') return;
+    try {
+      decoder.decode(new EncodedVideoChunk({
+        type: isKey ? 'key' : 'delta',
+        timestamp: performance.now() * 1000, // µs
+        data: au,
+      }));
+    } catch(e){
+      // при десинхронизации проще вернуться к ожиданию ключевого кадра
+      waitingKey = true;
+      try{ decoder.close(); }catch{}
+      decoder = null;
+    }
+  }
+
+  function onFrame(frame){
+    if (canvas.width !== frame.displayWidth){
+      canvas.width  = frame.displayWidth;
+      canvas.height = frame.displayHeight;
+    }
+    ctx.drawImage(frame, 0, 0);
+    frame.close();
+    frames++;
+    const dt = performance.now() - t0;
+    if (dt > 1000){
+      const fps = (frames*1000/dt).toFixed(1);
+      const mbps = (bytes*8/1e6/(dt/1000)).toFixed(2);
+      hud.textContent = `h264  ${fps} fps  ${mbps} Mbit/s`;
+      frames = 0; bytes = 0; t0 = performance.now();
+    }
+  }
+}
+
+// следим за сменой кодека на сервере и перезапускаемся при необходимости
+setInterval(async ()=>{
+  try {
+    const a = await getCurrent();
+    const newMode = a?.current?.codec === 'h264' ? 'h264' : 'mjpeg';
+    if (newMode !== mode){ location.reload(); }
+  } catch {}
+}, 3000);
+
+start();
+</script></body></html>
