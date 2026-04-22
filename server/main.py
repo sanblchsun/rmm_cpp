@@ -348,11 +348,26 @@ async def stream_mjpeg(aid: str):
 async def ws_h264(ws: WebSocket, aid: str):
     await ws.accept()
     a = await get_agent(aid)
-    q: asyncio.Queue = asyncio.Queue(maxsize=200)
-    if a.h264_keyframe_buffer:
-        await ws.send_bytes(bytes(a.h264_keyframe_buffer))
+    q: asyncio.Queue = asyncio.Queue(maxsize=400)
+
+    # КРИТИЧНО: snapshot буфера и подписка на очередь должны выполняться
+    # атомарно относительно event loop — между ними не должно быть ни одного
+    # await. Иначе ingest-корутина может обработать новые chunk'и: они
+    # окажутся в буфере (уже снят snapshot? значит не попадут в него) и не
+    # попадут в нашу очередь (мы ещё не в subscribers). На клиенте получится
+    # дыра между snapshot и live-частью -> decoder: Decoding error на первом
+    # же P-кадре после дыры.
+    #
+    # Порядок: сперва подписываемся, потом снимаем snapshot. Тогда каждый
+    # новый chunk гарантированно попадает либо в snapshot (если push_h264
+    # выполнился до нашей строки со snapshot), либо в очередь (если после
+    # подписки). Перекрытия нет, дыр нет.
     a.h264_subscribers.add(q)
+    snapshot = bytes(a.h264_keyframe_buffer) if a.h264_keyframe_buffer else b""
+
     try:
+        if snapshot:
+            await ws.send_bytes(snapshot)
         while True:
             chunk = await q.get()
             await ws.send_bytes(chunk)

@@ -186,6 +186,32 @@
         return b & 0x1f;
       }
 
+      async function pickDecoderConfig(codec) {
+        const candidates = [
+          {
+            codec,
+            hardwareAcceleration: "prefer-hardware",
+            optimizeForLatency: true,
+          },
+          { codec, hardwareAcceleration: "prefer-hardware" },
+          { codec, optimizeForLatency: true },
+          { codec },
+          {
+            codec,
+            hardwareAcceleration: "prefer-software",
+            optimizeForLatency: true,
+          },
+          { codec, hardwareAcceleration: "prefer-software" },
+        ];
+        for (const cfg of candidates) {
+          try {
+            const res = await VideoDecoder.isConfigSupported(cfg);
+            if (res && res.supported) return res.config || cfg;
+          } catch {}
+        }
+        return null;
+      }
+
       function startH264(canvas) {
         if (!("VideoDecoder" in window)) {
           showErr("Браузер не поддерживает WebCodecs. Обновите Chrome/Edge.");
@@ -193,6 +219,7 @@
         }
         const ctx = canvas.getContext("2d");
         let decoder = null;
+        let initInFlight = false;
         let buf = new Uint8Array(0);
         let waitingKey = true;
         let frames = 0,
@@ -211,6 +238,7 @@
         ws.onmessage = (ev) => {
           const add = new Uint8Array(ev.data);
           bytes += add.length;
+          if (add.length === 0) return;
           const merged = new Uint8Array(buf.length + add.length);
           merged.set(buf, 0);
           merged.set(add, buf.length);
@@ -239,13 +267,28 @@
           }
           return out;
         }
+
+        // Границы access unit'ов — строго AUD (NAL type 9).
+        // Единственное исключение: самый первый start code в буфере, если это
+        // SPS (type 7) — потому что серверный snapshot начинается сразу со SPS
+        // (AUD перед ним обрезан find_idr_offset'ом). Все последующие границы
+        // — только AUD. Раньше здесь разрешался и SPS в общем случае, из-за
+        // чего ключевой AU [AUD SPS PPS IDR] резался на два «куска»:
+        // [AUD] (без слайса -> decoder error) и [SPS PPS IDR slice].
         function drainAUs() {
           const codes = findStartCodes(buf);
           if (codes.length < 2) return;
           const starts = [];
-          for (const c of codes) {
+          for (let k = 0; k < codes.length; k++) {
+            const c = codes[k];
             const t = nalType(buf[c.pos + c.len]);
-            if (t === 9 || t === 7) starts.push(c.pos);
+            if (t === 9) {
+              starts.push(c.pos);
+            } else if (t === 7 && starts.length === 0) {
+              // SPS допускается как первая граница, только если до него
+              // вообще не было ни одного AUD в буфере.
+              starts.push(c.pos);
+            }
           }
           if (starts.length < 2) return;
           for (let i = 0; i < starts.length - 1; i++) {
@@ -267,31 +310,83 @@
           const h = (x) => x.toString(16).padStart(2, "0").toUpperCase();
           return `avc1.${h(au[off + 1])}${h(au[off + 2])}${h(au[off + 3])}`;
         }
+
+        function resetDecoder() {
+          if (decoder) {
+            try {
+              decoder.close();
+            } catch {}
+          }
+          decoder = null;
+          waitingKey = true;
+          initInFlight = false;
+        }
+
+        async function initDecoder(keyAUCopy) {
+          initInFlight = true;
+          const codec = codecStringFromSPS(keyAUCopy);
+          try {
+            const cfg = await pickDecoderConfig(codec);
+            if (!cfg) {
+              showErr(`Нет поддерживаемой конфигурации для ${codec}`);
+              initInFlight = false;
+              return;
+            }
+            const dec = new VideoDecoder({
+              output: onFrame,
+              error: (e) => {
+                showErr("decoder: " + e.message);
+                resetDecoder();
+              },
+            });
+            dec.configure(cfg);
+            decoder = dec;
+            waitingKey = false;
+            hud.textContent =
+              `h264: decoder configured (${cfg.codec}` +
+              (cfg.hardwareAcceleration
+                ? `, ${cfg.hardwareAcceleration}`
+                : "") +
+              `)`;
+            try {
+              dec.decode(
+                new EncodedVideoChunk({
+                  type: "key",
+                  timestamp: performance.now() * 1000,
+                  data: keyAUCopy,
+                }),
+              );
+            } catch {
+              resetDecoder();
+            }
+          } catch (e) {
+            showErr("init failed: " + e.message);
+            resetDecoder();
+          } finally {
+            initInFlight = false;
+          }
+        }
+
         function handleAU(au) {
-          const hasSPS = findNALU(au, 7) >= 0;
           const hasIDR = findNALU(au, 5) >= 0;
-          const isKey = hasSPS || hasIDR;
+          const hasP = findNALU(au, 1) >= 0;
+          // AU без единого слайс-NAL (только AUD/SEI/SPS/PPS) — не отдаём
+          // декодеру, это не самостоятельный access unit для декодирования.
+          if (!hasIDR && !hasP) return;
+
+          const isKey = hasIDR;
+
+          if (!decoder) {
+            if (!isKey || initInFlight) return;
+            const keyCopy = new Uint8Array(au);
+            initDecoder(keyCopy);
+            return;
+          }
+          if (decoder.state !== "configured") return;
           if (waitingKey) {
             if (!isKey) return;
             waitingKey = false;
-            const codec = codecStringFromSPS(au);
-            try {
-              decoder = new VideoDecoder({
-                output: onFrame,
-                error: (e) => showErr("decoder: " + e.message),
-              });
-              decoder.configure({
-                codec,
-                optimizeForLatency: true,
-                hardwareAcceleration: "prefer-hardware",
-              });
-              hud.textContent = `h264: decoder configured (${codec})`;
-            } catch (e) {
-              showErr("configure failed: " + e.message);
-              return;
-            }
           }
-          if (!decoder || decoder.state !== "configured") return;
           try {
             decoder.decode(
               new EncodedVideoChunk({
@@ -300,12 +395,8 @@
                 data: au,
               }),
             );
-          } catch (e) {
-            waitingKey = true;
-            try {
-              decoder.close();
-            } catch {}
-            decoder = null;
+          } catch {
+            resetDecoder();
           }
         }
         function onFrame(frame) {
@@ -353,7 +444,6 @@
         }
       }
 
-      // если кодек сменили из админ-панели — перезагрузим страницу
       setInterval(async () => {
         try {
           const a = await getCurrent();

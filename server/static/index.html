@@ -45,12 +45,21 @@
       .card .ctrl {
         padding: 8px 12px;
         display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
+        gap: 6px;
+        flex-wrap: nowrap;
+        overflow-x: auto;
         font-size: 12px;
         background: #191919;
         border-top: 1px solid #2a2a2a;
         align-items: center;
+      }
+      .ctrl label {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
+        min-width: 0;
+        color: #bbb;
       }
       .ctrl select,
       .ctrl input,
@@ -60,12 +69,52 @@
         border: 1px solid #333;
         border-radius: 4px;
         padding: 4px 6px;
+        font: inherit;
+      }
+      .ctrl select {
+        max-width: 90px;
+      }
+      .ctrl input {
+        width: 56px;
+      }
+      .ctrl input[name="mjpeg_q"],
+      .ctrl input[name="fps"] {
+        width: 44px;
       }
       .ctrl button {
         cursor: pointer;
+        background: #2a3b2a;
+        border-color: #3a5a3a;
+        color: #e7ffe7;
+        transition:
+          transform 60ms ease,
+          background 120ms ease,
+          border-color 120ms ease;
+        user-select: none;
+        min-width: 84px;
+        text-align: center;
       }
-      .ctrl button:hover {
-        background: #333;
+      .ctrl button:hover:not(:disabled) {
+        background: #355535;
+        border-color: #4a7a4a;
+      }
+      .ctrl button:active:not(:disabled) {
+        background: #1e2d1e;
+        border-color: #2c4a2c;
+        transform: translateY(1px);
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+      .ctrl button.ok {
+        background: #2e6b2e;
+        border-color: #4aa04a;
+      }
+      .ctrl button.bad {
+        background: #6b2e2e;
+        border-color: #a04a4a;
+      }
+      .ctrl button:disabled {
+        opacity: 0.6;
+        cursor: default;
       }
       .dot {
         width: 10px;
@@ -123,13 +172,13 @@
         return (await fetch(u)).json();
       }
       async function apiPost(u, body) {
-        return (
-          await fetch(u, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          })
-        ).json();
+        const r = await fetch(u, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
       }
 
       function ensureGrid() {
@@ -161,18 +210,18 @@
           <option value="h264">H.264</option>
         </select>
       </label>
-      <label data-role="h264-only">encoder
+      <label data-role="h264-only">enc
         <select name="encoder">
-          <option value="cpu">CPU (libx264)</option>
-          <option value="amf">AMD (h264_amf)</option>
-          <option value="qsv">Intel (h264_qsv)</option>
-          <option value="nvenc">NVIDIA (h264_nvenc)</option>
+          <option value="cpu"   title="libx264">CPU</option>
+          <option value="amf"   title="h264_amf">AMD</option>
+          <option value="qsv"   title="h264_qsv">Intel</option>
+          <option value="nvenc" title="h264_nvenc">NVIDIA</option>
         </select>
       </label>
-      <label data-role="h264-only">bitrate <input name="bitrate" size="4" value="4M"></label>
-      <label data-role="mjpeg-only">mjpeg_q <input name="mjpeg_q" size="3" value="4" type="number" min="2" max="31"></label>
-      <label>fps <input name="fps" size="3" value="30" type="number" min="1" max="120"></label>
-      <button>Применить</button>
+      <label data-role="h264-only">br <input name="bitrate" value="4M"></label>
+      <label data-role="mjpeg-only">q <input name="mjpeg_q" value="4" type="number" min="2" max="31"></label>
+      <label>fps <input name="fps" value="30" type="number" min="1" max="120"></label>
+      <button type="button">Применить</button>
     </div>`;
         const name = el.querySelector("b");
         const tag = el.querySelector(".tag");
@@ -195,7 +244,14 @@
         sel("codec").addEventListener("change", applyCodecVisibility);
         applyCodecVisibility();
 
+        let busy = false;
         btn.onclick = async () => {
+          if (busy) return;
+          busy = true;
+          const original = btn.textContent;
+          btn.disabled = true;
+          btn.classList.remove("ok", "bad");
+          btn.textContent = "…";
           const body = {
             codec: sel("codec").value,
             encoder: sel("encoder").value,
@@ -203,7 +259,20 @@
             fps: parseInt(sel("fps").value, 10),
             mjpeg_q: parseInt(sel("mjpeg_q").value, 10),
           };
-          await apiPost(`/agents/${encodeURIComponent(a.id)}/config`, body);
+          try {
+            await apiPost(`/agents/${encodeURIComponent(a.id)}/config`, body);
+            btn.textContent = "✓ применено";
+            btn.classList.add("ok");
+          } catch (e) {
+            btn.textContent = "✗ ошибка";
+            btn.classList.add("bad");
+          }
+          setTimeout(() => {
+            btn.textContent = original;
+            btn.classList.remove("ok", "bad");
+            btn.disabled = false;
+            busy = false;
+          }, 900);
         };
 
         return {
@@ -220,6 +289,7 @@
           lastTime: Date.now(),
           lastSrc: "",
           placeholder: null,
+          btn,
         };
       }
 
@@ -262,7 +332,7 @@
         const focusedHere =
           document.activeElement &&
           document.activeElement.closest(".card") === c.el;
-        if (!focusedHere) {
+        if (!focusedHere && !c.btn.disabled) {
           c.sel("codec").value = t.codec || "mjpeg";
           c.sel("encoder").value = t.encoder || "cpu";
           c.sel("bitrate").value = t.bitrate || "4M";
