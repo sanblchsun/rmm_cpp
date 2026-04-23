@@ -74,11 +74,16 @@
         return d.agents.find((a) => a.id === id);
       }
 
-      // ========= CONTROL (mouse) =========
+      // ========= CONTROL (mouse + keyboard + clipboard) =========
       let ctrlWs = null;
-      let agentScreen = null; // {w,h}
+      let agentScreen = null;
       let lastMove = 0;
       const MOUSE_MOVE_HZ = 100;
+
+      // Набор физических кодов, по которым мы отправили key_down и ещё не отправили key_up.
+      // Нужно, чтобы не дублировать key_down на автоповторе и чтобы на blur/отключении
+      // отпустить все «залипшие» клавиши.
+      const heldKeys = new Set();
 
       function openCtrlWS() {
         const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -90,6 +95,7 @@
         };
         ctrlWs.onclose = () => {
           ctl.textContent = "ctrl: offline";
+          heldKeys.clear();
           ctrlWs = null;
           setTimeout(openCtrlWS, 2000);
         };
@@ -99,18 +105,34 @@
           } catch {}
         };
         ctrlWs.onmessage = (ev) => {
+          let d;
           try {
-            const d = JSON.parse(ev.data);
-            if (d.type === "hello") {
-              agentScreen = { w: d.screen_w | 0, h: d.screen_h | 0 };
-              ctl.textContent = `ctrl: ${agentScreen.w}×${agentScreen.h}`;
+            d = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          if (d.type === "hello") {
+            agentScreen = { w: d.screen_w | 0, h: d.screen_h | 0 };
+            ctl.textContent = `ctrl: ${agentScreen.w}×${agentScreen.h}`;
+          } else if (d.type === "clipboard") {
+            // Буфер обмена агента изменился — кладём в свой.
+            // В Chrome это требует secure-context: работает на localhost и https.
+            // На http://LAN_IP writeText может отклониться — это ограничение браузера.
+            if (
+              d.text &&
+              navigator.clipboard &&
+              navigator.clipboard.writeText
+            ) {
+              navigator.clipboard.writeText(d.text).catch(() => {});
             }
-          } catch {}
+          }
         };
       }
       function sendCtrl(obj) {
         if (ctrlWs && ctrlWs.readyState === 1) ctrlWs.send(JSON.stringify(obj));
       }
+
+      // ---- mouse ----
       function mapToScreen(el, clientX, clientY, mediaW, mediaH) {
         if (!mediaW || !mediaH) return null;
         const rect = el.getBoundingClientRect();
@@ -180,6 +202,87 @@
           { passive: false },
         );
       }
+
+      // ---- keyboard ----
+      // Печатный символ без Ctrl/Alt/Meta -> уходит одной Unicode-буквой через "text".
+      // Всё остальное (Enter, стрелки, модификаторы, F1..F12, шорткаты) -> "key_down"/"key_up".
+      function isPrintableKey(e) {
+        return (
+          e.key && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey
+        );
+      }
+      function sendKeyDown(code) {
+        if (heldKeys.has(code)) return;
+        heldKeys.add(code);
+        sendCtrl({ type: "key_down", code });
+      }
+      function sendKeyUp(code) {
+        if (!heldKeys.has(code)) return;
+        heldKeys.delete(code);
+        sendCtrl({ type: "key_up", code });
+      }
+
+      window.addEventListener("keydown", (e) => {
+        if (!ctrlWs || ctrlWs.readyState !== 1) return;
+
+        // Ctrl/Meta + V: глотаем V здесь, дальше сработает document.paste,
+        // который возьмёт текст буфера обмена и отправит его как "text".
+        if ((e.ctrlKey || e.metaKey) && e.code === "KeyV" && !e.altKey) {
+          e.preventDefault();
+          return;
+        }
+
+        if (isPrintableKey(e)) {
+          sendCtrl({ type: "text", text: e.key });
+        } else {
+          sendKeyDown(e.code);
+        }
+        e.preventDefault();
+      });
+
+      window.addEventListener("keyup", (e) => {
+        if (!ctrlWs || ctrlWs.readyState !== 1) return;
+        if ((e.ctrlKey || e.metaKey) && e.code === "KeyV" && !e.altKey) {
+          // соответствующий keydown мы проглотили -> keyup тоже не шлём
+          e.preventDefault();
+          return;
+        }
+        sendKeyUp(e.code);
+        e.preventDefault();
+      });
+
+      // Страница потеряла фокус — отпускаем всё, что «держали», чтобы на агенте
+      // не осталось висящих модификаторов.
+      window.addEventListener("blur", () => {
+        for (const code of Array.from(heldKeys)) sendKeyUp(code);
+      });
+
+      // ---- clipboard: viewer -> agent (вставка) ----
+      // Paste-событие даёт синхронный доступ к clipboardData даже без secure-context.
+      // Перед отправкой текста отпускаем удерживаемые модификаторы на агенте
+      // (иначе "Ctrl удерживается + типаем 'a'" = Ctrl+A = select all в блокноте).
+      // Сразу после текста — возвращаем их обратно (пользователь физически всё ещё держит).
+      document.addEventListener("paste", (e) => {
+        if (!ctrlWs || ctrlWs.readyState !== 1) return;
+        const text = e.clipboardData && e.clipboardData.getData("text/plain");
+        if (text) {
+          const mods = [
+            "ControlLeft",
+            "ControlRight",
+            "AltLeft",
+            "AltRight",
+            "MetaLeft",
+            "MetaRight",
+            "OSLeft",
+            "OSRight",
+          ];
+          const held = mods.filter((c) => heldKeys.has(c));
+          for (const c of held) sendCtrl({ type: "key_up", code: c });
+          sendCtrl({ type: "text", text });
+          for (const c of held) sendCtrl({ type: "key_down", code: c });
+        }
+        e.preventDefault();
+      });
 
       // ========= H.264 via WebCodecs =========
       function nalType(b) {
@@ -267,14 +370,6 @@
           }
           return out;
         }
-
-        // Границы access unit'ов — строго AUD (NAL type 9).
-        // Единственное исключение: самый первый start code в буфере, если это
-        // SPS (type 7) — потому что серверный snapshot начинается сразу со SPS
-        // (AUD перед ним обрезан find_idr_offset'ом). Все последующие границы
-        // — только AUD. Раньше здесь разрешался и SPS в общем случае, из-за
-        // чего ключевой AU [AUD SPS PPS IDR] резался на два «куска»:
-        // [AUD] (без слайса -> decoder error) и [SPS PPS IDR slice].
         function drainAUs() {
           const codes = findStartCodes(buf);
           if (codes.length < 2) return;
@@ -282,13 +377,8 @@
           for (let k = 0; k < codes.length; k++) {
             const c = codes[k];
             const t = nalType(buf[c.pos + c.len]);
-            if (t === 9) {
-              starts.push(c.pos);
-            } else if (t === 7 && starts.length === 0) {
-              // SPS допускается как первая граница, только если до него
-              // вообще не было ни одного AUD в буфере.
-              starts.push(c.pos);
-            }
+            if (t === 9) starts.push(c.pos);
+            else if (t === 7 && starts.length === 0) starts.push(c.pos);
           }
           if (starts.length < 2) return;
           for (let i = 0; i < starts.length - 1; i++) {
@@ -299,9 +389,8 @@
         }
         function findNALU(au, type) {
           const cs = findStartCodes(au);
-          for (const c of cs) {
+          for (const c of cs)
             if (nalType(au[c.pos + c.len]) === type) return c.pos + c.len;
-          }
           return -1;
         }
         function codecStringFromSPS(au) {
@@ -370,12 +459,8 @@
         function handleAU(au) {
           const hasIDR = findNALU(au, 5) >= 0;
           const hasP = findNALU(au, 1) >= 0;
-          // AU без единого слайс-NAL (только AUD/SEI/SPS/PPS) — не отдаём
-          // декодеру, это не самостоятельный access unit для декодирования.
           if (!hasIDR && !hasP) return;
-
           const isKey = hasIDR;
-
           if (!decoder) {
             if (!isKey || initInFlight) return;
             const keyCopy = new Uint8Array(au);
@@ -421,12 +506,10 @@
 
       // ========= start =========
       let mode = null;
-
       async function start() {
         const a = await getCurrent();
         const cur = a?.current?.codec || "mjpeg";
         mode = cur === "h264" ? "h264" : "mjpeg";
-
         if (mode === "mjpeg") {
           box.innerHTML = `<img id="media" src="/stream/mjpeg/${encodeURIComponent(id)}?t=${Date.now()}">`;
           const img = document.getElementById("media");
