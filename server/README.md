@@ -1,3 +1,25 @@
+# Установка mkcert (если не установлен)
+
+# Linux:
+
+sudo apt install mkcert # или скачайте с GitHub
+
+# Windows:
+
+# Скачайте mkcert.exe с https://github.com/FiloSottile/mkcert/releases
+
+# Создание локального CA
+
+mkcert -install
+
+# Создание сертификата
+
+mkcert localhost 127.0.0.1 192.168.88.127
+
+# Запуск с созданными сертификатами
+
+uvicorn main:app --host 0.0.0.0 --port 8000 --ssl-keyfile localhost+2-key.pem --ssl-certfile localhost+2.pem --proxy-headers --no-access-log
+
 ## Запуск как systemd-сервис (production на Linux)
 
 sudo useradd -r -s /usr/sbin/nologin relay
@@ -23,9 +45,11 @@ docker compose up -d --build
 docker compose logs -f
 
 ## 8. Reverse proxy + HTTPS (когда сервер смотрит в интернет)
+
 ## nginx на том же Linux-хосте, сертификат через Let's Encrypt:
 
 ### nginx.conf
+
 ```
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 
@@ -60,10 +84,12 @@ server {
     }
 }
 ```
-### После этого рекомендую снова повесить uvicorn только на 127.0.0.1:
-# в run.sh / relay.service
---host 127.0.0.1 --port 8000
 
+### После этого рекомендую снова повесить uvicorn только на 127.0.0.1:
+
+# в run.sh / relay.service
+
+--host 127.0.0.1 --port 8000
 
 и закрыть 8000 в файерволе — наружу торчит только 443.
 
@@ -71,8 +97,7 @@ Windows-агент ходит по HTTPS на 443 — но текущий agent.
 
 A (проще): агент → внутренний IP/VPN по HTTP, nginx наружу по HTTPS.
 B: добавить TLS через системный Schannel в агенте (без внешних либ). Это отдельная доработка main.cpp на ~150 строк — готов добавить по запросу.
-C: подложить в Windows stunnel как локальный TLS-прокси (агент → 127.0.0.1:HTTP → stunnel → HTTPS наружу). Без правки C++.
-9. Рабочий процесс разработки «Linux-сервер ⇄ Windows-агент»
+C: подложить в Windows stunnel как локальный TLS-прокси (агент → 127.0.0.1:HTTP → stunnel → HTTPS наружу). Без правки C++. 9. Рабочий процесс разработки «Linux-сервер ⇄ Windows-агент»
 Удобная схема, если Linux-сервер — это, например, ВМ или домашний Linux, а разрабатываете с Windows:
 
 Код сервера держите в git. На Linux:
@@ -84,20 +109,19 @@ bash
 
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 Агент собираете на Windows (build.bat) и запускаете там же (run.bat) — он ходит на Linux по IP/домену.
-Открываете http://<linux-ip>:8000/ в браузере Windows — видите поток ~30 fps.
-10. Чек-лист запуска «с нуля»
+Открываете http://<linux-ip>:8000/ в браузере Windows — видите поток ~30 fps. 10. Чек-лист запуска «с нуля»
 На Linux (сервер):
 
- python3 --version ≥ 3.10
- cd server && ./install.sh
- ./run.sh — в логах Uvicorn running on http://0.0.0.0:8000
- curl http://127.0.0.1:8000/healthz → {"ok":true,...}
- sudo ufw allow 8000/tcp (или аналог)
- С другой машины: curl http://<ip>:8000/healthz работает
+python3 --version ≥ 3.10
+cd server && ./install.sh
+./run.sh — в логах Uvicorn running on http://0.0.0.0:8000
+curl http://127.0.0.1:8000/healthz → {"ok":true,...}
+sudo ufw allow 8000/tcp (или аналог)
+С другой машины: curl http://<ip>:8000/healthz работает
 На Windows (агент):
 
- ffmpeg.exe рядом с main.cpp
- build.bat → появился agent.exe
- run.bat правильный --server=<linux-ip>
- В консоли агента: throughput ~... kbit/s каждые 5 секунд
- В браузере на http://<linux-ip>:8000/ — карточка агента и поток
+ffmpeg.exe рядом с main.cpp
+build.bat → появился agent.exe
+run.bat правильный --server=<linux-ip>
+В консоли агента: throughput ~... kbit/s каждые 5 секунд
+В браузере на http://<linux-ip>:8000/ — карточка агента и поток
