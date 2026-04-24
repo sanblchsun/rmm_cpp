@@ -1,0 +1,12 @@
+# docker-compose.dev.yml
+version: "3.8"
+services:
+  nginx:
+    image: nginx:stable-alpine
+    container_name: nginx
+    network_mode: host
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./letsencrypt/live/dev.local:/etc/letsencrypt/live/dev.local:ro
+      - ./server/static:/server/static:ro
+    restart: unless-stopped

@@ -10,11 +10,13 @@ sudo apt install mkcert # или скачайте с GitHub
 
 # Создание локального CA
 
+sudo apt install libnss3-tools
+
 mkcert -install
 
 # Создание сертификата
 
-mkcert localhost 127.0.0.1 192.168.88.127
+mkcert localhost 127.0.0.1 192.168.2.222
 
 # Запуск с созданными сертификатами
 
