@@ -233,6 +233,7 @@
         }
 
         if (isPrintableKey(e)) {
+          console.log("Sending text:", e.key);
           sendCtrl({ type: "text", text: e.key });
         } else {
           sendKeyDown(e.code);
@@ -279,6 +280,7 @@
           const held = mods.filter((c) => heldKeys.has(c));
           for (const c of held) sendCtrl({ type: "key_up", code: c });
           sendCtrl({ type: "text", text });
+          console.log("Sending text:", text);
           for (const c of held) sendCtrl({ type: "key_down", code: c });
         }
         e.preventDefault();

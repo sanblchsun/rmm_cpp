@@ -165,7 +165,6 @@ static void tls_close(TlsConn *c)
 // verify_cert=false — разрешает самоподписанные сертификаты.
 static bool tls_handshake(TlsConn *c, const std::string &host, bool verify_cert)
 {
-    log("Starting TLS handshake with " + host + ", verify_cert=" + (verify_cert ? "true" : "false"));
     // — получаем учётные данные клиента —
     SCHANNEL_CRED sc{};
     sc.dwVersion = SCHANNEL_CRED_VERSION;
