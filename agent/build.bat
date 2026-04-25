@@ -18,7 +18,7 @@ where g++ >nul 2>nul
 if %errorlevel%==0 (
     echo [build] using g++ ^(static^)
     g++ -O2 -std=c++17 -static -static-libgcc -static-libstdc++ ^
-        -DSECURITY_WIN32 main.cpp -o agent.exe -lws2_32 -luser32 -lsecur32 -lcrypt32
+        main.cpp -o agent.exe -lws2_32 -luser32 -lsecur32 -lcrypt32
     if errorlevel 1 exit /b 1
     echo [build] done: agent.exe  ^(standalone^)
     goto :eof
