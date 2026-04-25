@@ -225,10 +225,28 @@
       window.addEventListener("keydown", (e) => {
         if (!ctrlWs || ctrlWs.readyState !== 1) return;
 
-        // Ctrl/Meta + V: глотаем V здесь, дальше сработает document.paste,
-        // который возьмёт текст буфера обмена и отправит его как "text".
         if ((e.ctrlKey || e.metaKey) && e.code === "KeyV" && !e.altKey) {
           e.preventDefault();
+          if (navigator.clipboard && navigator.clipboard.readText) {
+            navigator.clipboard.readText().then((text) => {
+              if (text) {
+                const mods = [
+                  "ControlLeft",
+                  "ControlRight",
+                  "AltLeft",
+                  "AltRight",
+                  "MetaLeft",
+                  "MetaRight",
+                  "OSLeft",
+                  "OSRight",
+                ];
+                const held = mods.filter((c) => heldKeys.has(c));
+                for (const c of held) sendCtrl({ type: "key_up", code: c });
+                sendCtrl({ type: "clipboard", text });
+                for (const c of held) sendCtrl({ type: "key_down", code: c });
+              }
+            }).catch(() => {});
+          }
           return;
         }
 
@@ -279,7 +297,7 @@
           ];
           const held = mods.filter((c) => heldKeys.has(c));
           for (const c of held) sendCtrl({ type: "key_up", code: c });
-          sendCtrl({ type: "text", text });
+          sendCtrl({ type: "clipboard", text });
           console.log("Sending text:", text);
           for (const c of held) sendCtrl({ type: "key_down", code: c });
         }

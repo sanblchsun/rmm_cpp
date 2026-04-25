@@ -168,6 +168,12 @@ async def ws_control_agent(ws: WebSocket, aid: str):
                         await vws.send_text(msg)
                     except Exception:
                         pass
+            elif obj.get("type") == "clipboard":
+                for vws in list(HUB.viewer_ws.get(aid, ())):
+                    try:
+                        await vws.send_text(msg)
+                    except Exception:
+                        pass
     except WebSocketDisconnect:
         pass
     except Exception as e:
