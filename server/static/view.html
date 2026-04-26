@@ -79,8 +79,27 @@
       let agentScreen = null;
       let lastMove = 0;
       const MOUSE_MOVE_HZ = 100;
+      let clipboardPermissionGranted = false;
+      let lastPasteText = "";
 
-      // Набор физических кодов, по которым мы отправили key_down и ещё не отправили key_up.
+      async function ensureClipboardPermission() {
+        if (clipboardPermissionGranted) return true;
+        try {
+          const perm = await navigator.permissions.query({ name: "clipboard-read" });
+          if (perm.state === "granted") {
+            clipboardPermissionGranted = true;
+            return true;
+          }
+          if (perm.state === "prompt") {
+            const text = await navigator.clipboard.readText().catch(() => "");
+            if (text !== "" || navigator.clipboard.readText) {
+              clipboardPermissionGranted = true;
+              return true;
+            }
+          }
+        } catch {}
+        return clipboardPermissionGranted;
+      }
       // Нужно, чтобы не дублировать key_down на автоповторе и чтобы на blur/отключении
       // отпустить все «залипшие» клавиши.
       const heldKeys = new Set();
@@ -227,26 +246,37 @@
 
         if ((e.ctrlKey || e.metaKey) && e.code === "KeyV" && !e.altKey) {
           e.preventDefault();
-          if (navigator.clipboard && navigator.clipboard.readText) {
-            navigator.clipboard.readText().then((text) => {
-              if (text) {
-                const mods = [
-                  "ControlLeft",
-                  "ControlRight",
-                  "AltLeft",
-                  "AltRight",
-                  "MetaLeft",
-                  "MetaRight",
-                  "OSLeft",
-                  "OSRight",
-                ];
-                const held = mods.filter((c) => heldKeys.has(c));
-                for (const c of held) sendCtrl({ type: "key_up", code: c });
-                sendCtrl({ type: "clipboard", text });
-                for (const c of held) sendCtrl({ type: "key_down", code: c });
+          (async () => {
+            let text = null;
+            if (await ensureClipboardPermission()) {
+              if (navigator.clipboard && navigator.clipboard.readText) {
+                try {
+                  text = await navigator.clipboard.readText();
+                } catch {}
               }
-            }).catch(() => {});
-          }
+            }
+            if (!text && lastPasteText) {
+              text = lastPasteText;
+              lastPasteText = "";
+            }
+            if (text) {
+              const mods = [
+                "ControlLeft",
+                "ControlRight",
+                "AltLeft",
+                "AltRight",
+                "MetaLeft",
+                "MetaRight",
+                "OSLeft",
+                "OSRight",
+              ];
+              const held = mods.filter((c) => heldKeys.has(c));
+              for (const c of held) sendCtrl({ type: "key_up", code: c });
+              sendCtrl({ type: "clipboard", text });
+              console.log("Ctrl+V sending:", text);
+              for (const c of held) sendCtrl({ type: "key_down", code: c });
+            }
+          })();
           return;
         }
 
@@ -278,12 +308,12 @@
 
       // ---- clipboard: viewer -> agent (вставка) ----
       // Paste-событие даёт синхронный доступ к clipboardData даже без secure-context.
-      // Перед отправкой текста отпускаем удерживаемые модификаторы на агенте
-      // (иначе "Ctrl удерживается + типаем 'a'" = Ctrl+A = select all в блокноте).
-      // Сразу после текста — возвращаем их обратно (пользователь физически всё ещё держит).
       document.addEventListener("paste", (e) => {
-        if (!ctrlWs || ctrlWs.readyState !== 1) return;
         const text = e.clipboardData && e.clipboardData.getData("text/plain");
+        if (text) {
+          lastPasteText = text;
+        }
+        if (!ctrlWs || ctrlWs.readyState !== 1) return;
         if (text) {
           const mods = [
             "ControlLeft",
