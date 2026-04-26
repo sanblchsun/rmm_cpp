@@ -347,7 +347,7 @@
         const rate = dt > 0 ? (df / dt).toFixed(1) : "0.0";
         c.lastFrames = total;
         c.lastTime = Date.now();
-        c.stats.textContent = `${rate}/s · uptime ${a.uptime_s}s · h264 viewers:${a.h264_viewers}`;
+        c.stats.textContent = `${rate}/s · uptime ${a.uptime_s}s`;
       }
 
       async function refresh() {
