@@ -273,8 +273,13 @@
               const held = mods.filter((c) => heldKeys.has(c));
               for (const c of held) sendCtrl({ type: "key_up", code: c });
               sendCtrl({ type: "clipboard", text });
-              console.log("Ctrl+V sending:", text);
+              await new Promise((r) => setTimeout(r, 50));
+              sendCtrl({ type: "key_down", code: "ControlLeft" });
+              sendCtrl({ type: "key_down", code: "KeyV" });
+              sendCtrl({ type: "key_up", code: "KeyV" });
+              sendCtrl({ type: "key_up", code: "ControlLeft" });
               for (const c of held) sendCtrl({ type: "key_down", code: c });
+              console.log("Ctrl+V sent:", text);
             }
           })();
           return;
