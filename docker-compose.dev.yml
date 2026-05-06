@@ -8,5 +8,5 @@ services:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./letsencrypt/live/dev.local:/etc/letsencrypt/live/dev.local:ro
-      - ./server/static:/server/static:ro
+      - ./app/static:/app/static:ro
     restart: unless-stopped

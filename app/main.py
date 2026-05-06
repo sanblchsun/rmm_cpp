@@ -1,6 +1,7 @@
 # server/main.py
 # FastAPI: MJPEG + H.264, переключение кодека через /agents/{id}/config,
 # управление мышью через /ws/control/{agent|viewer}/{id}.
+import os
 import asyncio
 import time
 import json
@@ -424,9 +425,11 @@ async def healthz():
     return {"ok": True, "agents": len(AGENTS)}
 
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+current_dir = os.path.dirname(os.path.abspath(__file__))
+static_path = os.path.join(current_dir, "static")
+app.mount("/static", StaticFiles(directory=static_path), name="static")
 
 
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html")
+    return FileResponse("app/static/index.html")
